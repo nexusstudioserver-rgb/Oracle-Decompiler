@@ -116,14 +116,12 @@ end
 
 -- ================================================== house style (Luau) =====
 -- A faithful port of the Oracle server styler: same rules, same hard gates.
-local KEYWORDS = {
-	and_ = 1, break_ = 1, continue_ = 1, do_ = 1, else_ = 1, elseif_ = 1, end_ = 1,
-	false_ = 1, for_ = 1, function_ = 1, if_ = 1, in_ = 1, local_ = 1, nil_ = 1,
-	not_ = 1, or_ = 1, repeat_ = 1, return_ = 1, then_ = 1, true_ = 1, until_ = 1, while_ = 1,
-}
-for k in pairs(KEYWORDS) do
-	local w = k:gsub("_$", "")
-	KEYWORDS[k] = nil
+local KEYWORDS = {}
+for _, w in ipairs({
+	"and", "break", "continue", "do", "else", "elseif", "end",
+	"false", "for", "function", "if", "in", "local", "nil",
+	"not", "or", "repeat", "return", "then", "true", "until", "while",
+}) do
 	KEYWORDS[w] = true
 end
 
@@ -1106,6 +1104,14 @@ if _G.ORACLE_LIB_ONLY then
 	return LIB
 end
 
-buildGui()
-note("[oracle] panel ready - DECOMPILE GAME writes workspace/" .. safeName(gameName()))
+local bootOk, bootErr = pcall(function()
+	buildGui()
+	note("[oracle] panel ready - DECOMPILE GAME writes workspace/" .. safeName(gameName()))
+end)
+if not bootOk then
+	local msg = "[Oracle] panel failed: " .. tostring(bootErr)
+	pcall(function() warn(msg) end)
+	print(msg)
+	_G.Oracle = LIB   -- console fallback: _G.Oracle.runDecompile()
+end
 return LIB
