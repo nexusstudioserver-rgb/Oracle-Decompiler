@@ -15,10 +15,17 @@
 	the Oracle house style RIGHT HERE in the executor - stamp on top, engine
 	banners gone, recovered names printed as real names behind hard gates.
 
-	DECOMPILE GAME  - writes every Script/LocalScript/ModuleScript to
-	                  workspace/Oracle/<GameName>/<FullPath>.lua
-	SAVE .RBXL      - drops the whole game file for the website flow
-	DISCORD         - copies the invite
+	NO PANEL, NO BUTTONS: the moment this loads, EVERY script in the game is
+	converted in the background, and a Source hook makes any reader (Dex
+	Explorer, dumps, save tools) see the Oracle house source instead of the
+	locked one. Console tells you the progress:
+
+	    [Oracle] found 132 scripts - converting in background
+	    [Oracle] done: 132/132 scripts converted - open any script in Dex ...
+
+	Extras in the console:  _G.Oracle.saveAll()  writes every converted
+	script to workspace/Oracle/<GameName>/<FullPath>.lua  -  and
+	_G.Oracle.sourceFor(script) returns one Oracle source on demand.
 ]]
 
 local STAMP = "-- Saved by UniversalSynSaveInstance (Join to Copy Games) https://discord.gg/wx4ThpAsmw"
@@ -830,7 +837,11 @@ local function engineDecompile(rawBytes, filename)
 	return nil, lastErr
 end
 
--- ============================================================= gui+jobs ====
+-- ==================================================== auto converter ======
+-- No panel, no buttons: the whole game turns into Oracle by itself.
+-- Every LuaSourceContainer gets its house-style source cached (background
+-- workers), and a __index hook makes ANY reader of `.Source` - Dex Explorer,
+-- script dumps, save tools - get the Oracle text instead of the locked one.
 local function gameName()
 	local ok, id = pcall(function() return game.PlaceId end)
 	if ok and type(id) == "number" and id > 0 then
@@ -860,29 +871,60 @@ local function ensureFolder(path)
 	end
 end
 
+local cache = setmetatable({}, { __mode = "k" })
+local doneCount = 0
+
+local function honestNote(reason)
+	return STAMP .. "\n\n-- Oracle: " .. reason .. "\n"
+end
+
+local function pathOfInst(inst)
+	local parts, n = {}, inst
+	local ok = true
+	while n ~= nil do
+		local okN, name = pcall(function() return n.Name end)
+		if not okN then ok = false break end
+		table.insert(parts, 1, name)
+		n = n.Parent
+	end
+	if not ok or #parts == 0 then return nil end
+	return table.concat(parts, "/")
+end
+
+local function sourceFor(inst)
+	local hit = cache[inst]
+	if hit ~= nil then
+		return hit
+	end
+	local bc, okBc = nil, false
+	okBc = pcall(function() bc = getBytecode(inst) end)
+	local text
+	if not okBc or type(bc) ~= "string" or bc == "" then
+		text = honestNote("this script had no code in the file")
+	else
+		local err
+		text, err = engineDecompile(bc, (pathOfInst(inst) or "script") .. ".luac")
+		if text == nil then
+			text = honestNote("the engine could not decompile this script (" .. tostring(err) .. ")")
+		end
+	end
+	cache[inst] = text
+	doneCount = doneCount + 1
+	return text
+end
+
 local function collectScripts()
 	local items = {}
 	local function walk(node, path)
-		for _, child in ipairs(node:GetChildren()) do
-			local ok = pcall(function() return child.ClassName end)
-			if ok then
+		local okKids, kids = pcall(function() return node:GetChildren() end)
+		if not okKids then return end
+		for _, child in ipairs(kids) do
+			local okClass, isScript = pcall(function() return child:IsA("LuaSourceContainer") end)
+			if okClass and isScript then
 				local childPath = path == "" and child.Name or (path .. "/" .. child.Name)
-				if child:IsA("LuaSourceContainer") then
-					local inCore = false
-					local anc = child
-					while anc ~= nil do
-						if anc == game:GetService("CoreGui") then
-							inCore = true
-							break
-						end
-						anc = anc.Parent
-					end
-					if not inCore then
-						items[#items + 1] = { instance = child, path = childPath }
-					end
-				else
-					walk(child, childPath)
-				end
+				items[#items + 1] = { instance = child, path = childPath }
+			else
+				walk(child, path == "" and child.Name or (path .. "/" .. child.Name))
 			end
 		end
 	end
@@ -890,199 +932,67 @@ local function collectScripts()
 	return items
 end
 
-local statusLabel, outputBox, gui
-
-local function note(text)
-	if outputBox then
-		outputBox.Text = outputBox.Text .. text .. "\n"
-	end
-end
-
-local function setStatus(text)
-	if statusLabel then
-		statusLabel.Text = text
-	end
-end
-
-local function buildGui()
-	if gui then
-		return gui
-	end
-	local parent = (getHui and getHui()) or game:GetService("CoreGui")
-	local screen = Instance.new("ScreenGui")
-	screen.Name = "OraclePanel"
-	screen.ResetOnSpawn = false
-	pcall(function() screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling end)
-	screen.Parent = parent
-
-	local frame = Instance.new("Frame")
-	frame.Size = UDim2.new(0, 380, 0, 250)
-	frame.Position = UDim2.new(0.5, -190, 0.5, -125)
-	frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-	frame.BorderSizePixel = 0
-	frame.Active = true
-	frame.Draggable = true
-	frame.Parent = screen
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, -70, 0, 34)
-	title.BackgroundTransparency = 1
-	title.Text = "ORACLE  -  copy any game"
-	title.TextColor3 = Color3.fromRGB(235, 238, 245)
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 15
-	title.Parent = frame
-
-	local close = Instance.new("TextButton")
-	close.Size = UDim2.new(0, 26, 0, 26)
-	close.Position = UDim2.new(1, -30, 0, 4)
-	close.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
-	close.Text = "X"
-	close.TextColor3 = Color3.fromRGB(200, 200, 210)
-	close.Font = Enum.Font.GothamBold
-	close.TextSize = 13
-	close.Parent = frame
-	close.MouseButton1Click:Connect(function()
-		screen.Enabled = not screen.Enabled
-	end)
-
-	local function button(text, y, color)
-		local b = Instance.new("TextButton")
-		b.Size = UDim2.new(1, -24, 0, 34)
-		b.Position = UDim2.new(0, 12, 0, y)
-		b.BackgroundColor3 = color
-		b.Text = text
-		b.TextColor3 = Color3.fromRGB(250, 250, 252)
-		b.Font = Enum.Font.GothamBold
-		b.TextSize = 14
-		b.Parent = frame
-		return b
-	end
-
-	local decompileBtn = button("DECOMPILE GAME", 40, Color3.fromRGB(47, 127, 224))
-	local saveBtn = button("SAVE .RBXL", 80, Color3.fromRGB(58, 62, 74))
-	local discordBtn = button("DISCORD", 120, Color3.fromRGB(88, 101, 242))
-
-	statusLabel = Instance.new("TextLabel")
-	statusLabel.Size = UDim2.new(1, -24, 0, 20)
-	statusLabel.Position = UDim2.new(0, 12, 0, 160)
-	statusLabel.BackgroundTransparency = 1
-	statusLabel.Text = "ready - " .. DISCORD
-	statusLabel.TextColor3 = Color3.fromRGB(150, 156, 170)
-	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-	statusLabel.Font = Enum.Font.Gotham
-	statusLabel.TextSize = 12
-	statusLabel.Parent = frame
-
-	outputBox = Instance.new("TextBox")
-	outputBox.Size = UDim2.new(1, -24, 1, -190)
-	outputBox.Position = UDim2.new(0, 12, 0, 184)
-	outputBox.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
-	outputBox.TextColor3 = Color3.fromRGB(170, 176, 190)
-	outputBox.Font = Enum.Font.Code
-	outputBox.TextSize = 11
-	outputBox.TextXAlignment = Enum.TextXAlignment.Left
-	outputBox.TextYAlignment = Enum.TextYAlignment.Top
-	outputBox.MultiLine = true
-	outputBox.ClearTextOnFocus = false
-	outputBox.Text = ""
-	outputBox.Parent = frame
-
-	decompileBtn.MouseButton1Click:Connect(function()
-		tspawn(runDecompile)
-	end)
-	saveBtn.MouseButton1Click:Connect(function()
-		tspawn(runSave)
-	end)
-	discordBtn.MouseButton1Click:Connect(function()
-		if setClipboard then
-			pcall(setClipboard, DISCORD)
-			note("[discord] invite copied")
-		else
-			note("[discord] " .. DISCORD)
+local function warm(items)
+	local idx = 0
+	local function work()
+		while true do
+			idx = idx + 1
+			local item = items[idx]
+			if item == nil then
+				return
+			end
+			pcall(sourceFor, item.instance)
 		end
-	end)
-
-	gui = screen
-	return screen
+	end
+	local workers = math.min(4, #items)
+	for _ = 1, workers do
+		tspawn(work)
+	end
 end
 
-function runDecompile()
-	if getBytecode == nil then
-		note("[error] this executor has no getscriptbytecode")
-		return
-	end
+local function saveAll()
 	if writeFile == nil then
-		note("[error] this executor has no writefile")
-		return
+		print("[Oracle] this executor has no writefile")
+		return 0
 	end
-	setStatus("scanning scripts...")
 	local items = collectScripts()
-	if #items == 0 then
-		setStatus("nothing found to decompile")
-		note("[scan] no LuaSourceContainer outside CoreGui")
-		return
-	end
 	local root = "Oracle/" .. safeName(gameName())
 	ensureFolder(root)
-	local saved, failed = 0, 0
+	local n = 0
 	for _, item in ipairs(items) do
-		local ok, err = pcall(function()
+		local ok = pcall(function()
 			local rel = item.path:gsub("[^/]+", function(seg) return safeName(seg) end)
 			local dir = rel:match("^(.*)/[^/]+$")
-			if dir then
-				ensureFolder(root .. "/" .. dir)
-			end
-			local bc = getBytecode(item.instance)
-			if type(bc) ~= "string" or bc == "" then
-				failed = failed + 1
-				writeFile(root .. "/" .. rel .. ".lua",
-					STAMP .. "\n\n-- Oracle: this script had no code in the file\n")
-				note("[kept] " .. item.path .. " - no bytecode in the slot")
-				return
-			end
-			local text, derr = engineDecompile(bc, item.path .. ".luac")
-			if text == nil then
-				failed = failed + 1
-				writeFile(root .. "/" .. rel .. ".lua",
-					STAMP .. "\n\n-- Oracle: the engine could not decompile this script (" .. tostring(derr) .. ")\n")
-				note("[fail] " .. item.path .. " - " .. tostring(derr))
-				return
-			end
-			saved = saved + 1
-			writeFile(root .. "/" .. rel .. ".lua", text .. "\n")
-			note("[ok] " .. item.path)
+			if dir then ensureFolder(root .. "/" .. dir) end
+			writeFile(root .. "/" .. rel .. ".lua", sourceFor(item.instance) .. "\n")
+			n = n + 1
 		end)
-		if not ok then
-			failed = failed + 1
-			note("[fail] " .. item.path .. " - " .. tostring(err))
-		end
+		if not ok then n = n + 0 end
 	end
-	setStatus(string.format("done: %d saved, %d noted - workspace/%s", saved, failed, root))
+	print("[Oracle] saved " .. n .. " scripts to workspace/" .. root)
+	return n
 end
 
-function runSave()
-	if saveInstance == nil then
-		note("[error] this executor has no saveinstance")
-		return
+local function installHook()
+	if hookmetamethod == nil then
+		print("[Oracle] no hookmetamethod in this executor - Dex will show locked source; use _G.Oracle.saveAll()")
+		return false
 	end
-	setStatus("saving place file...")
-	local ok, err = pcall(function()
-		saveinstance({
-			Workspace = workspace,
-		})
-	end)
-	if not ok then
-		local ok2, err2 = pcall(saveInstance)
-		if not ok2 then
-			note("[fail] saveinstance: " .. tostring(err) .. " / " .. tostring(err2))
-			setStatus("save failed - see log")
-			return
+	local wrap = newcclosure or function(f) return f end
+	local oldIndex
+	oldIndex = hookmetamethod(game, "__index", wrap(function(self, key)
+		if key == "Source" then
+			local okIs, isScript = pcall(function() return self:IsA("LuaSourceContainer") end)
+			if okIs and isScript then
+				local okTxt, txt = pcall(sourceFor, self)
+				if okTxt then
+					return txt
+				end
+			end
 		end
-	end
-	note("[ok] place file saved by the executor")
-	setStatus("place file saved")
+		return oldIndex(self, key)
+	end))
+	return true
 end
 
 -- self-test / library export (harnesses load this file and call these)
@@ -1095,8 +1005,12 @@ local LIB = {
 	stripEngineBanner = stripEngineBanner,
 	engineDecompile = engineDecompile,
 	pureBase64 = pureBase64,
-	runDecompile = runDecompile,
+	sourceFor = sourceFor,
 	collectScripts = collectScripts,
+	warm = warm,
+	saveAll = saveAll,
+	installHook = installHook,
+	cache = cache,
 	STAMP = STAMP,
 	ENGINE = ENGINE,
 }
@@ -1105,13 +1019,24 @@ if _G.ORACLE_LIB_ONLY then
 end
 
 local bootOk, bootErr = pcall(function()
-	buildGui()
-	note("[oracle] panel ready - DECOMPILE GAME writes workspace/" .. safeName(gameName()))
+	print("[Oracle] turning every script in this game into Oracle house style...")
+	local items = collectScripts()
+	print("[Oracle] found " .. #items .. " scripts - converting in background")
+	warm(items)
+	tspawn(function()
+		local total = #items
+		while doneCount < total do
+			twait(1)
+		end
+		print(("[Oracle] done: %d/%d scripts converted - open any script in Dex to read its Oracle source"):format(doneCount, total))
+	end)
+	installHook()
+	_G.Oracle = LIB
 end)
 if not bootOk then
-	local msg = "[Oracle] panel failed: " .. tostring(bootErr)
+	local msg = "[Oracle] boot failed: " .. tostring(bootErr)
 	pcall(function() warn(msg) end)
 	print(msg)
-	_G.Oracle = LIB   -- console fallback: _G.Oracle.runDecompile()
+	_G.Oracle = LIB
 end
 return LIB
