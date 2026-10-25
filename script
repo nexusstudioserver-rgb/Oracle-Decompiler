@@ -973,26 +973,117 @@ local function saveAll()
 	return n
 end
 
-local function installHook()
-	if hookmetamethod == nil then
-		print("[Oracle] no hookmetamethod in this executor - Dex will show locked source; use _G.Oracle.saveAll()")
-		return false
-	end
+-- Some viewers (Dex notepads, script hubs) do not read `.Source` - they call
+-- the executor's own `decompile(script)` Lua global, which feeds lua.expert
+-- or friends. Wrap every such global we can see so Oracle answers there too.
+local function wrapDecompilers()
+	local wrapped = {}
 	local wrap = newcclosure or function(f) return f end
-	local oldIndex
-	oldIndex = hookmetamethod(game, "__index", wrap(function(self, key)
-		if key == "Source" then
-			local okIs, isScript = pcall(function() return self:IsA("LuaSourceContainer") end)
+	local function makeOld(old)
+		return function(inst, ...)
+			local okIs, isScript = pcall(function() return inst:IsA("LuaSourceContainer") end)
 			if okIs and isScript then
-				local okTxt, txt = pcall(sourceFor, self)
+				local okTxt, txt = pcall(sourceFor, inst)
 				if okTxt then
 					return txt
 				end
 			end
+			return old(inst, ...)
 		end
-		return oldIndex(self, key)
-	end))
-	return true
+	end
+	-- fixed-name accessors: bare globals and _G are the same table on executors,
+	-- but not on every Luau host - touch both so the wrap lands everywhere.
+	local function getG(name)
+		if name == "decompile" then return decompile end
+		if name == "decompileScript" then return decompileScript end
+		if name == "getDecompiledSource" then return getDecompiledSource end
+		local ok, v = pcall(function() return _G[name] end)
+		return if ok then v else nil
+	end
+	local function setG(name, fn)
+		if name == "decompile" then decompile = fn
+		elseif name == "decompileScript" then decompileScript = fn
+		elseif name == "getDecompiledSource" then getDecompiledSource = fn end
+		pcall(function() _G[name] = fn end)
+	end
+	for _, name in ipairs({ "decompile", "decompileScript", "getDecompiledSource" }) do
+		local val = getG(name)
+		if type(val) == "function" then
+			local okSet = pcall(function() setG(name, wrap(makeOld(val))) end)
+			if okSet then
+				wrapped[#wrapped + 1] = name
+			end
+		end
+	end
+	local okSyn, synVal = pcall(function() return syn end)
+	if okSyn and type(synVal) == "table" and type(synVal.decompile) == "function" then
+		pcall(function()
+			syn.decompile = wrap(makeOld(syn.decompile))
+			wrapped[#wrapped + 1] = "syn.decompile"
+		end)
+	end
+	return wrapped
+end
+
+local function installHook()
+	local wrap = newcclosure or function(f) return f end
+	local function wrapper(oldIndex)
+		return wrap(function(self, key)
+			if key == "Source" then
+				local okIs, isScript = pcall(function() return self:IsA("LuaSourceContainer") end)
+				if okIs and isScript then
+					local okTxt, txt = pcall(sourceFor, self)
+					if okTxt then
+						return txt
+					end
+				end
+			end
+			return oldIndex(self, key)
+		end)
+	end
+	-- door 1: hookmetamethod (Synapse-style executors)
+	if type(hookmetamethod) == "function" then
+		local oldIndex
+		local ok = pcall(function()
+			oldIndex = hookmetamethod(game, "__index", wrapper(function(s2, k) return oldIndex(s2, k) end))
+		end)
+		if ok then return "hookmetamethod" end
+	end
+	-- door 2: raw metatable poke (Solara & friends: getrawmetatable + setreadonly)
+	if type(getrawmetatable) == "function" then
+		local ok, mode = pcall(function()
+			local mt = getrawmetatable(game)
+			if type(mt) ~= "table" or type(mt.__index) ~= "function" then
+				error("no indexable metatable")
+			end
+			local old = mt.__index
+			local wasRO = false
+			if type(setreadonly) == "function" then
+				pcall(function() wasRO = true; setreadonly(mt, false) end)
+			end
+			mt.__index = wrapper(old)
+			if wasRO and type(setreadonly) == "function" then
+				pcall(function() setreadonly(mt, true) end)
+			end
+			return "rawmetatable"
+		end)
+		if ok then return mode end
+	end
+	-- door 3: hookfunction on the C __index itself
+	if type(hookfunction) == "function" and type(getrawmetatable) == "function" then
+		local ok, mode = pcall(function()
+			local mt = getrawmetatable(game)
+			if type(mt) ~= "table" or type(mt.__index) ~= "function" then
+				error("no indexable metatable")
+			end
+			local old = mt.__index
+			hookfunction(old, wrapper(old))
+			return "hookfunction"
+		end)
+		if ok then return mode end
+	end
+	print("[Oracle] this executor exposes no metamethod hook - Dex source stays locked; use _G.Oracle.saveAll()")
+	return false
 end
 
 -- self-test / library export (harnesses load this file and call these)
@@ -1010,6 +1101,7 @@ local LIB = {
 	warm = warm,
 	saveAll = saveAll,
 	installHook = installHook,
+	wrapDecompilers = wrapDecompilers,
 	cache = cache,
 	STAMP = STAMP,
 	ENGINE = ENGINE,
@@ -1030,7 +1122,10 @@ local bootOk, bootErr = pcall(function()
 		end
 		print(("[Oracle] done: %d/%d scripts converted - open any script in Dex to read its Oracle source"):format(doneCount, total))
 	end)
-	installHook()
+	local hooked = installHook()
+	local wrapped = wrapDecompilers()
+	print("[Oracle] doors covered: Source hook = " .. (hooked or "OFF")
+		.. ", decompile wrappers = " .. (#wrapped > 0 and table.concat(wrapped, ",") or "none found"))
 	_G.Oracle = LIB
 end)
 if not bootOk then
